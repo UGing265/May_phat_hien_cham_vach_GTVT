@@ -1,0 +1,33 @@
+name: Python CI - GTVT Detector
+
+on:
+  push:
+    branches: [ "main", "dev" ]
+  pull_request:
+    branches: [ "main", "dev" ]
+
+jobs:
+  python-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 1) Check lỗi cú pháp toàn project
+      - name: Compile all Python files
+        run: python -m compileall .
+
+      # 2) Thử import main để bắt lỗi import/runtime cơ bản
+      - name: Import main module
+        run: python -c "import main"
