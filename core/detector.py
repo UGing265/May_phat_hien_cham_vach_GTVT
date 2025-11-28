@@ -1,40 +1,42 @@
+# core/detector.py
+
 import threading
-import time
 
 class Detector:
     """
-    Class này sau này sẽ chứa:
-    - xử lý camera bằng OpenCV
-    - phát hiện chạm vạch
-    - gọi hàm phát loa khi phát hiện
+    Detector nhận frame từ iPhone và xử lý.
+    - start(): bật chế độ xử lý
+    - stop(): tắt xử lý
+    - process_frame(frame): xử lý từng frame (numpy array BGR)
     """
+
     def __init__(self):
         self.running = False
-        self._thread = None
         self._lock = threading.Lock()
 
-    def _loop(self):
-        while True:
-            with self._lock:
-                if not self.running:
-                    break
-            # TODO: sau này xử lý frame ở đây
-            print("[Detector] Đang xử lý (fake)...")
-            time.sleep(1)
-
     def start(self):
+        # Bật cờ đang chạy
         with self._lock:
-            if self.running:
-                return
             self.running = True
-
-        print("[Detector] START")
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        print("[Detector] START (sẽ xử lý frame từ iPhone)")
 
     def stop(self):
+        # Tắt cờ đang chạy
+        with self._lock:
+            self.running = False
+        print("[Detector] STOP (ngưng xử lý frame)")
+
+    def process_frame(self, frame):
+        """
+        frame: numpy array (BGR) từ iPhone upload.
+        Ở đây CHƯA làm chạm vạch, chỉ log để biết pipeline chạy.
+        Sau này bạn thêm OpenCV ở đây.
+        """
         with self._lock:
             if not self.running:
+                # Nếu chưa bấm Start thì bỏ qua frame
                 return
-            self.running = False
-        print("[Detector] STOP")
+
+        # TODO: sau này bạn đặt code OpenCV: detect line, detect wheel, v.v.
+        h, w, _ = frame.shape
+        print(f"[Detector] Nhận frame {w}x{h} từ iPhone (running = True)")
