@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import math
 
 
 def detect_edges_vong8(frame):
@@ -8,7 +9,7 @@ def detect_edges_vong8(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 1.2)
 
-    edges = cv2.Canny(blur, 50, 150)
+    edges = cv2.Canny(blur, 40, 100)
 
     # Giữ vùng dưới (vòng 8 nằm nửa dưới ảnh)
     roi_mask = np.zeros_like(edges)
@@ -17,16 +18,11 @@ def detect_edges_vong8(frame):
 
     return edges
 
-
+ 
 def pick_vong8_candidates(contours, h, w):
-    """
-    Lọc contour nào có khả năng là vòng số 8:
-    - Diện tích trong khoảng cho phép
-    - Tâm nằm phía dưới
-    - Tỉ lệ trục ellipse hợp lý (không quá tròn, không quá dẹt)
-    """
+    """Lọc contour khả thi là vòng 8."""
     min_area = 3000
-    max_area = 0.5 * w * h  # không cho quá to bằng nửa màn hình
+    max_area = 0.5 * w * h
 
     candidates = []
     for cnt in contours:
@@ -38,11 +34,11 @@ def pick_vong8_candidates(contours, h, w):
 
         (cx, cy), (MA, ma), angle = cv2.fitEllipse(cnt)
 
-        # Tâm ellipse phải nằm ở nửa dưới (gần mặt đất hơn)
+        # tâm ellipse phải ở dưới
         if cy < h * 0.55:
             continue
 
-        # Tỉ lệ 2 trục
+        # tỉ lệ trục
         ratio = max(MA, ma) / (min(MA, ma) + 1e-6)
         if ratio < 1.1 or ratio > 4.0:
             continue
@@ -52,11 +48,8 @@ def pick_vong8_candidates(contours, h, w):
     return candidates
 
 
-def smooth_ellipse(new_ellipse, prev_ellipse, alpha=0.3):
-    """
-    Làm mượt ellipse mới với ellipse cũ bằng EMA (Exponential Moving Average)
-    alpha càng nhỏ → chuyển động càng mượt nhưng chậm.
-    """
+def smooth_ellipse(new_ellipse, prev_ellipse, alpha=0.2):
+    """Làm mượt ellipse mới với ellipse cũ."""
     if prev_ellipse is None:
         return new_ellipse
 
@@ -69,17 +62,24 @@ def smooth_ellipse(new_ellipse, prev_ellipse, alpha=0.3):
     sma = alpha * ma + (1 - alpha) * pma
     sangle = alpha * angle + (1 - alpha) * pangle
 
-    return ( (sx, sy), (sMA, sma), sangle )
+    return ((sx, sy), (sMA, sma), sangle)
+
+
+def ellipse_area(e):
+    (cx, cy), (MA, ma), angle = e
+    return math.pi * (MA / 2.0) * (ma / 2.0)
 
 
 def main():
-    cap = cv2.VideoCapture(0)  # hoặc đọc từ file nếu muốn: cv2.VideoCapture("video.mp4")
+    cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
         print("Không mở được camera")
         return
 
-    prev_ellipse = None  # lưu ellipse của frame trước
+    prev_ellipse = None
+    lost_frames = 0            # đếm số frame mất dấu
+    max_keep_lost = 5          # giữ ellipse cũ tối đa 5 frame khi mất dấu
 
     while True:
         ret, frame = cap.read()
@@ -88,11 +88,11 @@ def main():
 
         edges = detect_edges_vong8(frame)
 
-        # 1) Nối các đoạn edge bằng morphology CLOSE
+        # 1) Morphology CLOSE
         kernel = np.ones((5, 5), np.uint8)
         closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        # 2) Tìm contour từ edge đã nối
+        # 2) Contour
         contours, _ = cv2.findContours(
             closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -100,38 +100,65 @@ def main():
         h, w = frame.shape[:2]
         overlay = frame.copy()
 
-        # --- Lọc contour ứng viên vòng 8 ---
         candidates = pick_vong8_candidates(contours, h, w)
 
         ellipse_to_draw = None
 
         if candidates:
-            # Nếu đã có ellipse cũ → ưu tiên contour gần ellipse cũ nhất
+            # có contour ứng viên
             if prev_ellipse is not None:
                 pcx, pcy = prev_ellipse[0]
+                # ưu tiên contour gần ellipse cũ
                 candidates.sort(
                     key=lambda c: (c[0][0] - pcx) ** 2 + (c[0][1] - pcy) ** 2
                 )
             else:
-                # Chưa có ellipse cũ → chọn theo diện tích lớn nhất
+                # chưa có ellipse cũ → chọn contour lớn nhất
                 candidates.sort(key=lambda c: c[3], reverse=True)
 
             best = candidates[0]
             ellipse_raw = (best[0], best[1], best[2])
 
-            # Làm mượt với ellipse cũ
-            ellipse_to_draw = smooth_ellipse(ellipse_raw, prev_ellipse, alpha=0.3)
-            prev_ellipse = ellipse_to_draw
+            accept = True
+            if prev_ellipse is not None:
+                # 1) check tâm nhảy quá xa không
+                cx, cy = ellipse_raw[0]
+                pcx, pcy = prev_ellipse[0]
+                dist = math.hypot(cx - pcx, cy - pcy)
+                max_move = 0.15 * math.hypot(w, h)  # cho phép nhảy ~15% đường chéo
+                if dist > max_move:
+                    accept = False
 
-            # Vẽ contour ứng viên (màu vàng) để debug
-            cv2.drawContours(overlay, [best[4]], -1, (0, 255, 255), 1)
+                # 2) check diện tích khác quá nhiều không
+                area_new = ellipse_area(ellipse_raw)
+                area_old = ellipse_area(prev_ellipse)
+                if not (0.5 * area_old <= area_new <= 1.5 * area_old):
+                    accept = False
 
+            if accept:
+                ellipse_to_draw = smooth_ellipse(ellipse_raw, prev_ellipse, alpha=0.2)
+                prev_ellipse = ellipse_to_draw
+                lost_frames = 0
+                # vẽ contour debug
+                cv2.drawContours(overlay, [best[4]], -1, (0, 255, 255), 1)
+            else:
+                # contour này “nhảy” quá đà → bỏ, chỉ dùng ellipse cũ
+                if lost_frames < max_keep_lost:
+                    ellipse_to_draw = prev_ellipse
+                    lost_frames += 1
+                else:
+                    prev_ellipse = None
+                    ellipse_to_draw = None
         else:
-            # Không tìm được contour phù hợp:
-            # có thể giữ nguyên ellipse cũ 1–2 frame cho đỡ giật
-            ellipse_to_draw = prev_ellipse
+            # không có contour phù hợp
+            if prev_ellipse is not None and lost_frames < max_keep_lost:
+                ellipse_to_draw = prev_ellipse
+                lost_frames += 1
+            else:
+                prev_ellipse = None
+                ellipse_to_draw = None
 
-        # Vẽ ellipse màu xanh nếu có
+        # Vẽ ellipse màu xanh
         if ellipse_to_draw is not None:
             cv2.ellipse(overlay, ellipse_to_draw, (0, 255, 0), 2)
 
@@ -145,11 +172,8 @@ def main():
         )
         show = np.vstack((show_top, show_bottom))
 
-        # Thu nhỏ cho vừa màn
-        scale = 0.5
-        show = cv2.resize(show, None, fx=scale, fy=scale)
-
-        cv2.imshow("Vong 8 - Canny + Ellipse fit", show)
+        show = cv2.resize(show, None, fx=0.5, fy=0.5)
+        cv2.imshow("Vong 8 - Tracking ellipse", show)
 
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
