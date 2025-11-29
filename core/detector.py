@@ -1,5 +1,3 @@
-# core/detector.py
-
 import threading
 
 class Detector:
