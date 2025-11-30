@@ -1,40 +1,14 @@
 import cv2
 import os
 import sys
+import numpy as np
+from ultralytics import YOLO
 
 VIDEO_PATH = "IMG_1242.MOV"
-WINDOW_NAME = "CV Player AutoTrack"
+WINDOW_NAME = "YOLO Bike Debug"
 
-
-def create_tracker():
-    if hasattr(cv2, "legacy"):
-        return cv2.legacy.TrackerCSRT_create()
-    return cv2.TrackerCSRT_create()
-
-
-def auto_detect_object(frame, backsub, MIN_AREA=5000):
-    fg = backsub.apply(frame)
-    fg = cv2.medianBlur(fg, 5)
-    _, fg = cv2.threshold(fg, 200, 255, cv2.THRESH_BINARY)
-    fg = cv2.morphologyEx(
-        fg,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
-        iterations=2,
-    )
-
-    contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    best_box = None
-    best_area = 0
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area > MIN_AREA and area > best_area:
-            x, y, w, h = cv2.boundingRect(c)
-            best_area = area
-            best_box = (x, y, w, h)
-
-    return best_box
+# COCO pretrained model
+MODEL_PATH = "yolov8n.pt"  # để cùng folder hoặc để ultralytics tự tải
 
 
 def main():
@@ -42,71 +16,70 @@ def main():
         print("Video not found:", VIDEO_PATH)
         sys.exit(1)
 
+    # load YOLO model
+    model = YOLO(MODEL_PATH)  # lần đầu sẽ tự tải nếu chưa có
+
     cap = cv2.VideoCapture(VIDEO_PATH)
     if not cap.isOpened():
         print("Cannot open video:", VIDEO_PATH)
         sys.exit(1)
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-    backsub = cv2.createBackgroundSubtractorMOG2(
-        history=500, varThreshold=50, detectShadows=False
-    )
-
-    tracker = None
-    tracking = False
     trail = []
-    delay = 30  # ms / frame ≈ 33 FPS
-
-    # ===== Seek bar (only for scrubbing, not for resetting tracking) =====
-    def on_trackbar(_):
-        # Do nothing here – we will read the value manually in the loop
-        pass
-
-    cv2.createTrackbar("Seek", WINDOW_NAME, 0, total_frames - 1, on_trackbar)
-    last_seek_pos = 0
+    delay = 30  # ms (≈ 33 FPS)
+    frame_idx = 0
 
     while True:
-        # ---- Handle seeking (only allowed when NOT tracking) ----
-        seek_pos = cv2.getTrackbarPos("Seek", WINDOW_NAME)
-        if not tracking and seek_pos != last_seek_pos:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, seek_pos)
-            last_seek_pos = seek_pos
-            trail = []
-
         ret, frame = cap.read()
         if not ret:
+            print("End of video.")
             break
 
-        frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        frame_idx += 1
         display = frame.copy()
 
-        # =================== TRACK MODE ====================
-        if tracking and tracker is not None:
-            ok, box = tracker.update(frame)
-            if ok:
-                x, y, w, h = [int(v) for v in box]
-                cx = x + w // 2
-                cy = y + h // 2
+        # ----- YOLO detect every frame -----
+        # classes=[3] => motorbike in COCO
+        results = model(frame, verbose=False, conf=0.5, classes=[3])
 
-                cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.circle(display, (cx, cy), 4, (0, 0, 255), -1)
+        bike_box = None
+        if results and len(results) > 0:
+            r = results[0]
+            if r.boxes is not None and len(r.boxes) > 0:
+                # chọn box có confidence cao nhất
+                best_conf = 0.0
+                best = None
+                for b in r.boxes:
+                    conf = float(b.conf[0])
+                    if conf > best_conf:
+                        best_conf = conf
+                        best = b
+                if best is not None:
+                    x1, y1, x2, y2 = best.xyxy[0]
+                    x1, y1, x2, y2 = map(int, (x1, y1, x2, y2))
+                    w = x2 - x1
+                    h = y2 - y1
+                    bike_box = (x1, y1, w, h)
 
-                trail.append((cx, cy))
-                for i in range(1, len(trail)):
-                    cv2.line(display, trail[i - 1], trail[i], (255, 0, 0), 2)
+        if bike_box is not None:
+            x, y, w, h = bike_box
+            cx = x + w // 2
+            cy = y + h // 2
 
-                text = f"Tracking | Frame {frame_idx}"
-                color = (0, 255, 0)
-            else:
-                text = f"Tracking lost | Frame {frame_idx}"
-                color = (0, 0, 255)
+            # vẽ box + tâm
+            cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.circle(display, (cx, cy), 4, (0, 0, 255), -1)
 
-        # =================== PLAYBACK MODE ====================
+            # vẽ trail
+            trail.append((cx, cy))
+            for i in range(1, len(trail)):
+                cv2.line(display, trail[i - 1], trail[i], (255, 0, 0), 2)
+
+            text = f"Bike detected | Frame {frame_idx}"
+            color = (0, 255, 0)
         else:
-            text = f"Playback | Frame {frame_idx} (press 't' to auto-track)"
+            text = f"No bike | Frame {frame_idx}"
             color = (0, 255, 255)
 
         cv2.putText(
@@ -119,41 +92,21 @@ def main():
             2,
         )
 
-        # Update seek bar to current frame (no-op callback)
-        cv2.setTrackbarPos("Seek", WINDOW_NAME, frame_idx)
-
         cv2.imshow(WINDOW_NAME, display)
         key = cv2.waitKey(delay) & 0xFF
 
-        # Quit
         if key in (27, ord("q")):
             break
 
-        # Pause / Play
+        # pause / play
         if key == ord(" "):
             delay = 0 if delay != 0 else 30
 
-        # Faster / slower
-        if key == ord("+") or key == ord("="):
+        # speed control
+        if key in (ord("+"), ord("=")):
             delay = max(1, delay - 5)
-        if key == ord("-") or key == ord("_"):
+        if key in (ord("-"), ord("_")):
             delay += 5
-
-        # Step forward one frame
-        if key == ord("d"):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx + 1)
-
-        # Auto-track trigger
-        if key == ord("t"):
-            box = auto_detect_object(frame, backsub)
-            if box is not None:
-                tracker = create_tracker()
-                tracker.init(frame, box)
-                tracking = True
-                trail = []
-                print("Auto-init tracker with box:", box)
-            else:
-                print("No moving object detected at this frame.")
 
     cap.release()
     cv2.destroyAllWindows()
