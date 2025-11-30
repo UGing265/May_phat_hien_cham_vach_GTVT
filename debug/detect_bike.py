@@ -1,137 +1,118 @@
 import cv2
-import sys
 import os
+import sys
 
-# ===============================
-# CHỌN CHẾ ĐỘ INPUT
-# ===============================
-# "webcam"  → dùng webcam
-# "video"   → dùng video file
-# "image"   → dùng 1 ảnh tĩnh
-INPUT_MODE = "video"
+VIDEO_PATH = "IMG_1242.MOV"
+WINDOW_NAME = "Auto Track Xe"
 
-VIDEO_PATH = "xe.mp4"    # đổi đường dẫn video
-IMAGE_PATH = "xe.jpg"    # đổi đường dẫn ảnh
-
-
-# ===============================
-# TẠO TRACKER
-# ===============================
 def create_tracker():
-    # CSRT = chính xác, dùng tốt cho xe
     if hasattr(cv2, "legacy"):
         return cv2.legacy.TrackerCSRT_create()
-    else:
-        return cv2.TrackerCSRT_create()
+    return cv2.TrackerCSRT_create()
 
+def main():
+    if not os.path.exists(VIDEO_PATH):
+        print("Không tìm thấy video:", VIDEO_PATH)
+        sys.exit(1)
 
-# ===============================
-# LẤY FRAME ĐẦU
-# ===============================
-def get_first_frame():
-    global cap
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    if not cap.isOpened():
+        print("Không mở được video:", VIDEO_PATH)
+        sys.exit(1)
 
-    if INPUT_MODE == "webcam":
-        cap = cv2.VideoCapture(0)
-        ok, frame = cap.read()
-        return ok, frame
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-    elif INPUT_MODE == "video":
-        if not os.path.exists(VIDEO_PATH):
-            print("Không tìm thấy video:", VIDEO_PATH)
-            sys.exit()
-        cap = cv2.VideoCapture(VIDEO_PATH)
-        ok, frame = cap.read()
-        return ok, frame
+    # bộ trừ nền (background subtractor)
+    backsub = cv2.createBackgroundSubtractorMOG2(
+        history=500, varThreshold=50, detectShadows=False
+    )
 
-    elif INPUT_MODE == "image":
-        frame = cv2.imread(IMAGE_PATH)
-        if frame is None:
-            print("Không đọc được ảnh:", IMAGE_PATH)
-            sys.exit()
-        return True, frame
+    tracker = None
+    has_tracker = False
+    trail = []
+    frame_idx = 0
 
-    else:
-        print("INPUT_MODE không hợp lệ")
-        sys.exit()
+    MIN_AREA = 5000  # tùy video, chỉnh cho hợp (pixel)
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Hết video.")
+            break
 
+        frame_idx += 1
+        display = frame.copy()
 
-# ===============================
-# CHẠY CHƯƠNG TRÌNH
-# ===============================
-ok, frame = get_first_frame()
-if not ok:
-    print("Không lấy được frame đầu.")
-    sys.exit()
+        # ============ NẾU CHƯA CÓ TRACKER → TỰ TÌM XE ============
+        if not has_tracker:
+            fg = backsub.apply(frame)           # lấy vùng chuyển động
+            fg = cv2.medianBlur(fg, 5)
+            _, fg = cv2.threshold(fg, 200, 255, cv2.THRESH_BINARY)
+            fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,
+                                  cv2.getStructuringElement(cv2.MORPH_RECT,(5,5)),
+                                  iterations=2)
 
-# CHỌN VÙNG XE
-roi = cv2.selectROI("Chọn xe để track", frame, fromCenter=False, showCrosshair=True)
-cv2.destroyWindow("Chọn xe để track")
+            contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+            big_candidate = None
+            big_area = 0
 
-x, y, w, h = roi
-if w == 0 or h == 0:
-    print("Không chọn vùng, thoát.")
-    sys.exit()
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area < MIN_AREA:
+                    continue
+                x, y, w, h = cv2.boundingRect(c)
+                # có thể thêm điều kiện: nằm trong vùng đường thi, v.v.
+                if area > big_area:
+                    big_area = area
+                    big_candidate = (x, y, w, h)
 
-tracker = create_tracker()
-tracker.init(frame, roi)
+            if big_candidate is not None:
+                x, y, w, h = big_candidate
+                # init tracker lần đầu tiên
+                tracker = create_tracker()
+                tracker.init(frame, (x, y, w, h))
+                has_tracker = True
+                trail = []
+                print(f">> AUTO INIT TRACKER tại frame {frame_idx}, box={big_candidate}")
+                cv2.rectangle(display, (x, y), (x+w, y+h), (0, 255, 255), 2)
+                status = f"Auto-init tracker | Frame {frame_idx}"
+                color = (0, 255, 255)
+            else:
+                status = f"Đang chờ xe xuất hiện... Frame {frame_idx}"
+                color = (0, 255, 255)
 
-trail = []
-frame_id = 0
+        # ============ NẾU ĐÃ CÓ TRACKER → TRACK BÌNH THƯỜNG ============
+        else:
+            ok, box = tracker.update(frame)
+            if ok:
+                x, y, w, h = [int(v) for v in box]
+                cx = x + w // 2
+                cy = y + h // 2
 
-# Nếu là ảnh → chỉ chạy 1 frame
-if INPUT_MODE == "image":
-    cx = x + w // 2
-    cy = y + h // 2
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-    cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
-    cv2.imshow("Debug Track Xe (Ảnh)", frame)
-    cv2.waitKey(0)
+                cv2.rectangle(display, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                cv2.circle(display, (cx, cy), 4, (0, 0, 255), -1)
+
+                trail.append((cx, cy))
+                for i in range(1, len(trail)):
+                    cv2.line(display, trail[i-1], trail[i], (255, 0, 0), 2)
+
+                status = f"Tracking OK | Frame {frame_idx}"
+                color = (0, 255, 0)
+            else:
+                status = f"Tracking LOST | Frame {frame_idx}"
+                color = (0, 0, 255)
+
+        cv2.putText(display, status, (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA)
+
+        cv2.imshow(WINDOW_NAME, display)
+        key = cv2.waitKey(30) & 0xFF
+        if key in (27, ord('q')):
+            break
+
+    cap.release()
     cv2.destroyAllWindows()
-    sys.exit()
 
-
-# ===============================
-# LOOP CHO VIDEO / WEBCAM
-# ===============================
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        print("Hết video hoặc mất frame.")
-        break
-
-    frame_id += 1
-    ok, box = tracker.update(frame)
-
-    if ok:
-        x, y, w, h = [int(v) for v in box]
-        cx = x + w // 2
-        cy = y + h // 2
-
-        # Vẽ khung
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
-
-        # Trail
-        trail.append((cx, cy))
-        for i in range(1, len(trail)):
-            cv2.line(frame, trail[i-1], trail[i], (255, 0, 0), 2)
-
-        cv2.putText(frame, "Tracking OK", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-        print(f"[Frame {frame_id}] center=({cx},{cy}) box=({x},{y},{w},{h})")
-
-    else:
-        cv2.putText(frame, "Tracking LOST", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        print(f"[Frame {frame_id}] LOST")
-
-    cv2.imshow("Debug Track Xe", frame)
-    key = cv2.waitKey(1) & 0xFF
-
-    if key == 27:  # ESC
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
