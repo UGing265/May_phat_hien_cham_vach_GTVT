@@ -1,5 +1,3 @@
-// server/static/script.js
-
 async function callApi(path, options = {}) {
   try {
     const res = await fetch(path, {
